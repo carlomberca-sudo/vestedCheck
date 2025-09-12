@@ -2,8 +2,8 @@ name: Vesteda Watcher
 
 on:
   schedule:
-    - cron: "*/5 7-15 * 3-10 1-5"       # Mar–Oct: every 5 min Mon–Fri, 09–17 Rome ≈ 07–15 UTC
-    - cron: "*/5 8-16 * 11,12,1,2 1-5"  # Nov–Feb: every 5 min Mon–Fri, 09–17 Rome ≈ 08–16 UTC
+    - cron: "*/5 7-15 * 3-10 1-5"       # Mar–Oct: every 5 min Mon–Fri (09–17 Rome ≈ 07–15 UTC)
+    - cron: "*/5 8-16 * 11,12,1,2 1-5"  # Nov–Feb: every 5 min Mon–Fri (09–17 Rome ≈ 08–16 UTC)
   workflow_dispatch: {}
 
 concurrency:
@@ -13,7 +13,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     container:
       image: mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
@@ -21,19 +21,16 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Install Python deps (fast)
+      # Browsers & deps are already in this container, so we only need our libs
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install python-dotenv requests playwright==1.47.0
+          pip install python-dotenv requests
 
-      # Browsers are already in the container, but this is quick and safe
-      - name: Ensure Playwright browsers present
-        run: |
-          python -c "import playwright; print(playwright.__version__)"
-          playwright install
-
-      - name: Run watcher
+      # Run ONE pass then exit. 'timeout 90s' guarantees the job won't hang.
+      - name: Run watcher (single pass)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python vesteda_watch.py
+        run: |
+          timeout 90s python vesteda_watch.py || true
