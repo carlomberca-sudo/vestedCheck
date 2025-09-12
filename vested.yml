@@ -1,0 +1,45 @@
+name: Vesteda Watcher
+
+on:
+  # Run every 5 minutes during the workday window, Mon–Fri.
+  # GitHub Actions cron is in UTC, so we approximate Europe/Rome:
+  # - Mar–Oct (DST ≈ UTC+2): 09–17 local ≈ 07–15 UTC
+  # - Nov–Feb (STD ≈ UTC+1): 09–17 local ≈ 08–16 UTC
+  schedule:
+    - cron: "*/5 7-15 * 3-10 1-5"   # Mar–Oct, every 5 min, Mon–Fri
+    - cron: "*/5 8-16 * 11,12,1,2 1-5"  # Nov–Feb, every 5 min, Mon–Fri
+  workflow_dispatch: {}   # allows manual “Run workflow” from the UI
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps
+        run: |
+            python -m pip install --upgrade pip
+            pip install playwright python-dotenv requests
+            python -m playwright install --with-deps
+
+      - name: Run watcher
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python vesteda_watch.py
