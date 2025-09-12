@@ -22,17 +22,14 @@ jobs:
         uses: actions/checkout@v4
 
       # Browsers & OS deps are already in the container.
-      # We still need the Python packages in THIS run's venv.
-      - name: Install Python deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install playwright==1.47.0 python-dotenv requests
-
-      # Single pass then exit (perfect for cron runs).
-      # Bump timeout to 120s if your page is slow sometimes.
-      - name: Run watcher (single pass)
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          timeout 120s python vesteda_watch.py || true
+      # We still need the Python packages in THIS 
+ - name: Install Python deps
+    run: |
+    python -m pip install --upgrade pip
+    pip install playwright==1.47.0 python-dotenv requests 
+- name: Run watcher (single pass)
+  env:
+    TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  run: |
+    timeout 120s python vesteda_watch.py || true
