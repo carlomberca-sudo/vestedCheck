@@ -22,6 +22,7 @@ import json
 import os
 import signal
 import re
+import traceback
 from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import Optional
@@ -138,64 +139,77 @@ async def click_cookie_banner_if_present(page: Page) -> None:
 
 
 async def fetch_listing_count(page: Page) -> int:
-    await page.goto(VESTEDA_URL, wait_until="networkidle", timeout=60_000)
-    await click_cookie_banner_if_present(page)
-    await ensure_all_results_loaded(page)
-
-    # Give the page a moment to render lazy content
-    await page.wait_for_timeout(1500)
-
-    # Try multiple strategies to count listings (EN + NL labels)
-    labels = [
-        "View unit",           # English UI
-        "Bekijk woning",       # Dutch UI common label
-    ]
-    for label in labels:
+    # Try up to 3 attempts in case of transient load issues
+    for attempt in range(1, 4):
         try:
-            n = await page.get_by_role("link", name=label).count()
-            if n > 0:
+            # Faster first paint, then optionally wait for network idle
+            await page.goto(VESTEDA_URL, wait_until="domcontentloaded", timeout=60_000)
+            await click_cookie_banner_if_present(page)
+
+            try:
+                await page.wait_for_load_state("networkidle", timeout=30_000)
+            except Exception:
                 if VERBOSE:
-                    print(f"[count] via role('{label}') => {n}")
-                return n
-        except Exception:
-            pass
+                    print("[warn] networkidle wait skipped")
 
-    # CSS fallbacks
-    for css in [
-        "a:has-text('View unit')",
-        "a:has-text('Bekijk woning')",
-        "[data-testid*='unit-card']",
-        "[class*='unit-card']",
-    ]:
-        try:
-            n = await page.locator(css).count()
-            if n > 0:
-                if VERBOSE:
-                    print(f"[count] via CSS {css} => {n}")
-                return n
-        except Exception:
-            pass
+            await ensure_all_results_loaded(page)
+            await page.wait_for_timeout(1500)  # let lazy content render
 
-    # As a last resort, try to parse a numeric total from visible text
-    try:
-        body_text = await page.inner_text("body")
-        m = re.search(r"(\d+)\s+properties\s+for\s+rent", body_text, flags=re.I)
-        if m:
-            n = int(m.group(1))
-            if VERBOSE:
-                print(f"[count] via text 'properties for rent' => {n}")
-            return n
-    except Exception:
-        pass
+            # Count via accessible role (EN + NL)
+            for label in ["View unit", "Bekijk woning"]:
+                try:
+                    n = await page.get_by_role("link", name=label).count()
+                    if n > 0:
+                        if VERBOSE:
+                            print(f"[count] via role('{label}') => {n}")
+                        return n
+                except Exception:
+                    pass
 
-    # Debug aid: save a screenshot so the user can see what rendered
-    try:
-        await page.screenshot(path="vesteda_debug.png", full_page=True)
-        print("[debug] Saved screenshot to vesteda_debug.png")
-    except Exception:
-        pass
+            # CSS fallbacks
+            for css in [
+                "a:has-text('View unit')",
+                "a:has-text('Bekijk woning')",
+                "[data-testid*='unit-card']",
+                "[class*='unit-card']",
+            ]:
+                try:
+                    n = await page.locator(css).count()
+                    if n > 0:
+                        if VERBOSE:
+                            print(f"[count] via CSS {css} => {n}")
+                        return n
+                except Exception:
+                    pass
 
-    raise RuntimeError("Could not determine listing count.")
+            # Fallback: try to parse a numeric total from visible text
+            try:
+                body_text = await page.inner_text("body")
+                m = re.search(r"(\d+)\s+properties\s+for\s+rent", body_text, flags=re.I)
+                if m:
+                    n = int(m.group(1))
+                    if VERBOSE:
+                        print(f"[count] via text => {n}")
+                    return n
+            except Exception:
+                pass
+
+            # Save a debug screenshot on failure
+            try:
+                await page.screenshot(path=f"vesteda_debug_attempt{attempt}.png", full_page=True)
+                print(f"[debug] Saved screenshot to vesteda_debug_attempt{attempt}.png")
+            except Exception:
+                pass
+
+            raise RuntimeError("Could not determine listing count.")
+
+        except Exception as e:
+            print(f"[retry {attempt}/3] {e}")
+            traceback.print_exc()
+            if attempt == 3:
+                # last attempt: re-raise to be handled by caller
+                raise
+            await asyncio.sleep(2 * attempt)
 
 # ===================== SCHEDULER =====================
 
@@ -214,6 +228,8 @@ async def monitor_loop() -> None:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(locale="en-US", user_agent=USER_AGENT)
+        context.set_default_timeout(45_000)
+        context.set_default_navigation_timeout(60_000)
         page = await context.new_page()
 
         while True:
@@ -227,7 +243,6 @@ async def monitor_loop() -> None:
                         save_last_count(last_count)
                         if VERBOSE:
                             print(f"[init] Baseline set to {count}")
-                    
                     else:
                         changed = (count != last_count)
                         increased = (count > last_count)
@@ -243,6 +258,7 @@ async def monitor_loop() -> None:
                             print(f"[no change] {last_count} -> {count}")
                 except Exception as e:
                     print(f"[ERROR] {e}")
+                    traceback.print_exc()
 
                 await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
             else:
@@ -253,20 +269,10 @@ async def monitor_loop() -> None:
 
 
 def main() -> None:
-    # Handle Ctrl+C gracefully
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, loop.stop)
-        except NotImplementedError:
-            pass
-
     try:
-        loop.run_until_complete(monitor_loop())
-    finally:
-        loop.close()
+        asyncio.run(monitor_loop())
+    except KeyboardInterrupt:
+        print("[exit] Stopped by user")
 
 
 if __name__ == "__main__":
