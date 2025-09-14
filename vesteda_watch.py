@@ -257,9 +257,11 @@ async def monitor_loop() -> None:
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        ua = globals().get("USER_AGENT") or os.getenv("USER_AGENT") or ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/127.0.0.0 Safari/537.36")
+        ua = globals().get("USER_AGENT") or os.getenv("USER_AGENT") or (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/127.0.0.0 Safari/537.36"
+        )
         context = await browser.new_context(locale="en-US", user_agent=ua)
         context.set_default_timeout(45_000)
         context.set_default_navigation_timeout(60_000)
@@ -282,11 +284,11 @@ async def monitor_loop() -> None:
                             delta = count - last_count
                             arrow = "↗️" if delta > 0 else "↘️"
                             sign = "+" if delta > 0 else ""
-msg = (
-    f"⚠️ Vesteda changed: {last_count} → {count} "
-    f"({sign}{delta}) {arrow}\n{VESTEDA_URL}"
-)
-send_telegram(msg)
+                            msg = (
+                                f"⚠️ Vesteda changed: {last_count} → {count} "
+                                f"({sign}{delta}) {arrow}\n{VESTEDA_URL}"
+                            )
+                            send_telegram(msg)
                             last_count = count
                             save_last_count(last_count)
                         elif VERBOSE:
@@ -308,6 +310,11 @@ send_telegram(msg)
                 await asyncio.sleep(60)
 
 def main() -> None:
+    try:
+        asyncio.run(monitor_loop())
+    except KeyboardInterrupt:
+        print("[exit] Stopped by user")
+
     try:
         asyncio.run(monitor_loop())
     except KeyboardInterrupt:
