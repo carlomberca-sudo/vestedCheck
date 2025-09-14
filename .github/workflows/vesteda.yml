@@ -1,11 +1,10 @@
 name: Vesteda Watcher
 
 on:
-  # Every 5 min during work hours, Mon–Fri (Europe/Rome) using UTC approximation
   schedule:
     - cron: "*/5 7-15 * 3-10 1-5"       # Mar–Oct: 09–17 Rome ≈ 07–15 UTC
     - cron: "*/5 8-16 * 11,12,1,2 1-5"  # Nov–Feb: 09–17 Rome ≈ 08–16 UTC
-  workflow_dispatch: {}                  # manual "Run workflow" button
+  workflow_dispatch: {}
 
 concurrency:
   group: vesteda-${{ github.ref }}
@@ -16,19 +15,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     container:
-      image: mcr.microsoft.com/playwright/python:v1.47.0-jammy  # browsers & OS deps preinstalled
+      image: mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
     steps:
-      - name: Check out repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Install the Python libs we use; tzdata fixes ZoneInfo("Europe/Amsterdam")
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install playwright==1.47.0 python-dotenv requests tzdata
 
-      # Do ONE pass and exit (ideal for cron). Increase to 150–180s if your connection/site is slow.
+      - name: Sanity check Gist access
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          python - <<'PY'
+          import os, requests, sys
+          r = requests.get(
+            f"https://api.github.com/gists/{os.environ['GIST_ID']}",
+            headers={"Authorization": f"Bearer {os.environ['GIST_TOKEN']}",
+                     "Accept":"application/vnd.github+json"},
+            timeout=20
+          )
+          print("HTTP", r.status_code, r.text[:180])
+          sys.exit(0 if r.status_code==200 else 1)
+          PY
+
       - name: Run watcher (single pass)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -37,5 +50,13 @@ jobs:
           GIST_ID: ${{ secrets.GIST_ID }}
           SINGLE_PASS: "1"
         run: python vesteda_watch.py
-       
-          timeout 120s python vesteda_watch.py || true
+
+      # Optional: if a debug screenshot was saved, upload it
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vesteda-debug
+          path: |
+            vesteda_debug*.png
+          if-no-files-found: ignore
