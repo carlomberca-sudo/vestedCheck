@@ -257,7 +257,10 @@ async def monitor_loop() -> None:
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(locale="en-US", user_agent=USER_AGENT)
+        ua = globals().get("USER_AGENT") or os.getenv("USER_AGENT") or ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/127.0.0.0 Safari/537.36")
+        context = await browser.new_context(locale="en-US", user_agent=ua)
         context.set_default_timeout(45_000)
         context.set_default_navigation_timeout(60_000)
         page = await context.new_page()
@@ -277,9 +280,10 @@ async def monitor_loop() -> None:
                         increased = (count > last_count)
                         if changed and (not ONLY_NOTIFY_ON_INCREASE or increased):
                             delta = count - last_count
-                            arrow = "\u2197\ufe0f" if delta > 0 else "\u2198\ufe0f"
+                            arrow = "↗️" if delta > 0 else "↘️"
                             send_telegram(
-                                f"\u26a0\ufe0f Vesteda changed: {last_count} \u2192 {count} ({'+' if delta>0 else ''}{delta}) {arrow}\n{VESTEDA_URL}"
+                                f"⚠️ Vesteda changed: {last_count} → {count} ({'+' if delta>0 else ''}{delta}) {arrow}
+{VESTEDA_URL}"
                             )
                             last_count = count
                             save_last_count(last_count)
