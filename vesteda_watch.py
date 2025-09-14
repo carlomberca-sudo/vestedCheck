@@ -42,7 +42,7 @@ VESTEDA_URL = (
 CHECK_INTERVAL_MINUTES = 5
 
 # Working window (local Amsterdam time)
-WORKDAY_START = dtime(9, 0)   # 09:00
+WORKDAY_START = dtime(0, 0)   # 09:00
 WORKDAY_END = dtime(17, 0)    # 17:00 (inclusive)
 
 # Notify only when count INCREASES (True) or on ANY change (False)
