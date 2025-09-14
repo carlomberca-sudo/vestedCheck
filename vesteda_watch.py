@@ -21,9 +21,7 @@ import asyncio
 import json
 import os
 import signal
-import re
-import traceback
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -34,14 +32,18 @@ from playwright.async_api import async_playwright, Page
 
 # ===================== USER SETTINGS =====================
 # Amsterdam + 1+ bedroom public search page (English UI)
-VESTEDA_URL = "https://www.vesteda.com/en/unit-search?placeType=1&sortType=0&radius=5&s=1078%20PJ%20Amsterdam,%20Nederland&sc=woning&latitude=52.347286&longitude=4.9105463&filters=&priceFrom=600&priceTo=9999"
+VESTEDA_URL = (
+    "https://www.vesteda.com/en/unit-search?"
+    "bedRooms=1&lat=52.3666954&lng=4.89454&placeType=1&priceFrom=600&priceTo=9999&"
+    "radius=10&s=Amsterdam%2C+Nederland&sc=woning&unitTypes=1&unitTypes=2&unitTypes=4"
+)
 
 # Check every N minutes during working hours
-CHECK_INTERVAL_MINUTES = 3
+CHECK_INTERVAL_MINUTES = 5
 
 # Working window (local Amsterdam time)
-WORKDAY_START = dtime(9, 0)   # 00:00
-WORKDAY_END = dtime(16, 59)   # 23:59 (inclusive)
+WORKDAY_START = dtime(9, 0)   # 09:00
+WORKDAY_END = dtime(17, 0)    # 17:00 (inclusive)
 
 # Notify only when count INCREASES (True) or on ANY change (False)
 ONLY_NOTIFY_ON_INCREASE = False
@@ -49,21 +51,24 @@ ONLY_NOTIFY_ON_INCREASE = False
 # Optional: extra debugging prints
 VERBOSE = True
 
-# Pretend to be a normal desktop browser to avoid any headless blocking
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/127.0.0.0 Safari/537.36"
-)
-
 # ===================== CONSTANTS =====================
-TZ = ZoneInfo("Europe/Amsterdam")
+try:
+    TZ = ZoneInfo("Europe/Amsterdam")
+except Exception:
+    print("[WARN] tzdata missing; defaulting to UTC")
+    TZ = timezone.utc
 STATE_FILE = Path("vesteda_state.json")
 
 # Load environment (.env) for Telegram credentials
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+# Single-pass mode for GitHub Actions and remote state config (optional)
+SINGLE_PASS = os.getenv("SINGLE_PASS", "0") == "1"
+GIST_TOKEN = os.getenv("GIST_TOKEN", "").strip()
+GIST_ID = os.getenv("GIST_ID", "").strip()
+GIST_FILE = os.getenv("GIST_FILE", "vesteda_state.json").strip()
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print("[WARN] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set. Messages will not be sent.")
@@ -89,7 +94,72 @@ def send_telegram(text: str) -> None:
 
 # ===================== STATE =====================
 
+def load_last_count_remote() -> Optional[int]:
+    if not GIST_TOKEN or not GIST_ID:
+        return None
+    try:
+        r = requests.get(
+            f"https://api.github.com/gists/{GIST_ID}",
+            headers={
+                "Authorization": f"Bearer {GIST_TOKEN}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=20,
+        )
+        if r.status_code != 200:
+            if VERBOSE:
+                print(f"[gist] GET {r.status_code}: {r.text[:180]}")
+            return None
+        data = r.json()
+        files = data.get("files", {})
+        file_info = files.get(GIST_FILE)
+        if not file_info or "content" not in file_info:
+            return None
+        content = file_info["content"]
+        try:
+            obj = json.loads(content)
+            return int(obj.get("last_count"))
+        except Exception:
+            try:
+                return int(content.strip())
+            except Exception:
+                return None
+    except Exception as e:
+        if VERBOSE:
+            print(f"[gist] load error: {e}")
+        return None
+
+
+def save_last_count_remote(count: int) -> bool:
+    if not GIST_TOKEN or not GIST_ID:
+        return False
+    try:
+        payload = {"files": {GIST_FILE: {"content": json.dumps({"last_count": count})}}}
+        r = requests.patch(
+            f"https://api.github.com/gists/{GIST_ID}",
+            headers={
+                "Authorization": f"Bearer {GIST_TOKEN}",
+                "Accept": "application/vnd.github+json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        if r.status_code not in (200, 201):
+            if VERBOSE:
+                print(f"[gist] PATCH {r.status_code}: {r.text[:180]}")
+            return False
+        return True
+    except Exception as e:
+        if VERBOSE:
+            print(f"[gist] save error: {e}")
+        return False
+
+
 def load_last_count() -> Optional[int]:
+    # Prefer remote state when available (GitHub Actions)
+    v = load_last_count_remote()
+    if v is not None:
+        return v
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
@@ -100,7 +170,13 @@ def load_last_count() -> Optional[int]:
 
 
 def save_last_count(count: int) -> None:
-    STATE_FILE.write_text(json.dumps({"last_count": count}, indent=2))
+    # Save both remotely (if configured) and locally for dev runs
+    saved_remote = save_last_count_remote(count)
+    try:
+        STATE_FILE.write_text(json.dumps({"last_count": count}, indent=2))
+    except Exception:
+        if VERBOSE and not saved_remote:
+            print("[state] failed to save locally and remotely")
 
 # ===================== SCRAPER =====================
 
@@ -139,77 +215,32 @@ async def click_cookie_banner_if_present(page: Page) -> None:
 
 
 async def fetch_listing_count(page: Page) -> int:
-    # Try up to 3 attempts in case of transient load issues
-    for attempt in range(1, 4):
-        try:
-            # Faster first paint, then optionally wait for network idle
-            await page.goto(VESTEDA_URL, wait_until="domcontentloaded", timeout=60_000)
-            await click_cookie_banner_if_present(page)
+    await page.goto(VESTEDA_URL, wait_until="networkidle", timeout=60_000)
+    await click_cookie_banner_if_present(page)
+    await ensure_all_results_loaded(page)
 
+    # Count how many "View unit" links are present (one per listing card in EN UI)
+    try:
+        count = await page.get_by_role("link", name="View unit").count()
+        if VERBOSE:
+            print(f"[count] Found {count} 'View unit' links")
+        return count
+    except Exception:
+        # Fallback: count listing cards by common CSS hooks
+        for css in [
+            "a:has-text('View unit')",
+            ".listing-card a[href*='/en/']",
+            "[data-testid='unit-card']",
+        ]:
             try:
-                await page.wait_for_load_state("networkidle", timeout=30_000)
-            except Exception:
-                if VERBOSE:
-                    print("[warn] networkidle wait skipped")
-
-            await ensure_all_results_loaded(page)
-            await page.wait_for_timeout(1500)  # let lazy content render
-
-            # Count via accessible role (EN + NL)
-            for label in ["View unit", "Bekijk woning"]:
-                try:
-                    n = await page.get_by_role("link", name=label).count()
-                    if n > 0:
-                        if VERBOSE:
-                            print(f"[count] via role('{label}') => {n}")
-                        return n
-                except Exception:
-                    pass
-
-            # CSS fallbacks
-            for css in [
-                "a:has-text('View unit')",
-                "a:has-text('Bekijk woning')",
-                "[data-testid*='unit-card']",
-                "[class*='unit-card']",
-            ]:
-                try:
-                    n = await page.locator(css).count()
-                    if n > 0:
-                        if VERBOSE:
-                            print(f"[count] via CSS {css} => {n}")
-                        return n
-                except Exception:
-                    pass
-
-            # Fallback: try to parse a numeric total from visible text
-            try:
-                body_text = await page.inner_text("body")
-                m = re.search(r"(\d+)\s+properties\s+for\s+rent", body_text, flags=re.I)
-                if m:
-                    n = int(m.group(1))
+                n = await page.locator(css).count()
+                if n > 0:
                     if VERBOSE:
-                        print(f"[count] via text => {n}")
+                        print(f"[count] Fallback via {css} => {n}")
                     return n
             except Exception:
                 pass
-
-            # Save a debug screenshot on failure
-            try:
-                await page.screenshot(path=f"vesteda_debug_attempt{attempt}.png", full_page=True)
-                print(f"[debug] Saved screenshot to vesteda_debug_attempt{attempt}.png")
-            except Exception:
-                pass
-
-            raise RuntimeError("Could not determine listing count.")
-
-        except Exception as e:
-            print(f"[retry {attempt}/3] {e}")
-            traceback.print_exc()
-            if attempt == 3:
-                # last attempt: re-raise to be handled by caller
-                raise
-            await asyncio.sleep(2 * attempt)
+        raise RuntimeError("Could not determine listing count.")
 
 # ===================== SCHEDULER =====================
 
@@ -223,7 +254,6 @@ def within_work_window(now: datetime) -> bool:
 
 async def monitor_loop() -> None:
     last_count = load_last_count()
-    initial_msg_sent = False
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -237,7 +267,6 @@ async def monitor_loop() -> None:
             if within_work_window(now):
                 try:
                     count = await fetch_listing_count(page)
-                    # On stateless runners, avoid a startup ping every run
                     if last_count is None:
                         last_count = count
                         save_last_count(last_count)
@@ -260,19 +289,38 @@ async def monitor_loop() -> None:
                     print(f"[ERROR] {e}")
                     traceback.print_exc()
 
+                if SINGLE_PASS:
+                    if VERBOSE:
+                        print("[single-pass] done")
+                    return
                 await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
             else:
-                # Sleep until next minute during off-hours
                 if VERBOSE:
-                    print("[sleep] Outside working window; checking again in 60s")
+                    print("[sleep] Outside working window")
+                if SINGLE_PASS:
+                    return
                 await asyncio.sleep(60)
-
 
 def main() -> None:
     try:
         asyncio.run(monitor_loop())
     except KeyboardInterrupt:
         print("[exit] Stopped by user")
+
+    # Handle Ctrl+C gracefully
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, loop.stop)
+        except NotImplementedError:
+            pass
+
+    try:
+        loop.run_until_complete(monitor_loop())
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
