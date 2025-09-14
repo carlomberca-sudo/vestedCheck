@@ -281,10 +281,12 @@ async def monitor_loop() -> None:
                         if changed and (not ONLY_NOTIFY_ON_INCREASE or increased):
                             delta = count - last_count
                             arrow = "↗️" if delta > 0 else "↘️"
-                            send_telegram(
-                                f"⚠️ Vesteda changed: {last_count} → {count} ({'+' if delta>0 else ''}{delta}) {arrow}
-{VESTEDA_URL}"
-                            )
+                            sign = "+" if delta > 0 else ""
+msg = (
+    f"⚠️ Vesteda changed: {last_count} → {count} "
+    f"({sign}{delta}) {arrow}\n{VESTEDA_URL}"
+)
+send_telegram(msg)
                             last_count = count
                             save_last_count(last_count)
                         elif VERBOSE:
