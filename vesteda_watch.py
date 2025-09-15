@@ -34,9 +34,7 @@ from playwright.async_api import async_playwright, Page
 # ===================== USER SETTINGS =====================
 # Amsterdam + 1+ bedroom public search page (English UI)
 VESTEDA_URL = (
-    "https://www.vesteda.com/en/unit-search?"
-    "bedRooms=1&lat=52.3666954&lng=4.89454&placeType=1&priceFrom=600&priceTo=9999&"
-    "radius=10&s=Amsterdam%2C+Nederland&sc=woning&unitTypes=1&unitTypes=2&unitTypes=4"
+    "https://www.vesteda.com/nl/woning-zoeken?placeType=1&sortType=0&radius=5&s=1078%20PJ%20Amsterdam,%20Nederland&sc=woning&latitude=52.347286&longitude=4.9105463&filters=&priceFrom=500&priceTo=9999"
 )
 
 # Check every N minutes during working hours
