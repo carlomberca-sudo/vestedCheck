@@ -59,4 +59,13 @@ jobs:
           name: vesteda-debug
           path: |
             vesteda_debug*.png
+      - name: Upload debug artifacts
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: vesteda-debug
+    path: |
+      vesteda_debug*.png
+      vesteda_debug*.html
+    if-no-files-found: ignore
           if-no-files-found: ignore
