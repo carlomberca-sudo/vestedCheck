@@ -24,6 +24,7 @@ import signal
 from datetime import datetime, time as dtime, timezone
 from pathlib import Path
 from typing import Optional
+import traceback
 
 import requests
 from dotenv import load_dotenv
@@ -33,14 +34,16 @@ from playwright.async_api import async_playwright, Page
 # ===================== USER SETTINGS =====================
 # Amsterdam + 1+ bedroom public search page (English UI)
 VESTEDA_URL = (
-    "https://www.vesteda.com/en/unit-search?placeType=1&sortType=0&radius=5&s=1078%20PJ%20Amsterdam,%20Nederland&sc=woning&latitude=52.347286&longitude=4.9105463&filters=&priceFrom=600&priceTo=9999"
+    "https://www.vesteda.com/en/unit-search?"
+    "bedRooms=1&lat=52.3666954&lng=4.89454&placeType=1&priceFrom=600&priceTo=9999&"
+    "radius=10&s=Amsterdam%2C+Nederland&sc=woning&unitTypes=1&unitTypes=2&unitTypes=4"
 )
 
 # Check every N minutes during working hours
 CHECK_INTERVAL_MINUTES = 5
 
 # Working window (local Amsterdam time)
-WORKDAY_START = dtime(0, 0)   # 09:00
+WORKDAY_START = dtime(9, 0)   # 09:00
 WORKDAY_END = dtime(17, 0)    # 17:00 (inclusive)
 
 # Notify only when count INCREASES (True) or on ANY change (False)
@@ -213,32 +216,80 @@ async def click_cookie_banner_if_present(page: Page) -> None:
 
 
 async def fetch_listing_count(page: Page) -> int:
-    await page.goto(VESTEDA_URL, wait_until="networkidle", timeout=60_000)
-    await click_cookie_banner_if_present(page)
-    await ensure_all_results_loaded(page)
+    # Try up to 3 attempts in case of transient load issues
+    for attempt in range(1, 4):
+        try:
+            # Navigate and allow initial DOM paint
+            await page.goto(VESTEDA_URL, wait_until="domcontentloaded", timeout=60_000)
+            await click_cookie_banner_if_present(page)
 
-    # Count how many "View unit" links are present (one per listing card in EN UI)
-    try:
-        count = await page.get_by_role("link", name="View unit").count()
-        if VERBOSE:
-            print(f"[count] Found {count} 'View unit' links")
-        return count
-    except Exception:
-        # Fallback: count listing cards by common CSS hooks
-        for css in [
-            "a:has-text('View unit')",
-            ".listing-card a[href*='/en/']",
-            "[data-testid='unit-card']",
-        ]:
+            # Log page title and final URL (helps debug headless differences)
             try:
-                n = await page.locator(css).count()
-                if n > 0:
-                    if VERBOSE:
-                        print(f"[count] Fallback via {css} => {n}")
-                    return n
+                t = await page.title()
+                href = await page.evaluate("location.href")
+                if VERBOSE:
+                    print(f"[page] title: {t}")
+                    print(f"[page] url:   {href}")
             except Exception:
                 pass
-        raise RuntimeError("Could not determine listing count.")
+
+            # Give network a chance to settle, but don't hard-fail
+            try:
+                await page.wait_for_load_state("networkidle", timeout=30_000)
+            except Exception:
+                if VERBOSE:
+                    print("[warn] networkidle wait skipped")
+
+            await ensure_all_results_loaded(page)
+            await page.wait_for_timeout(1500)  # let lazy content render
+
+            # Accessible role (EN + NL)
+            for label in ("View unit", "Bekijk woning"):
+                try:
+                    n = await page.get_by_role("link", name=label).count()
+                    if n > 0:
+                        if VERBOSE:
+                            print(f"[count] via role('{label}') => {n}")
+                        return n
+                except Exception:
+                    pass
+
+            # CSS fallbacks
+            for css in (
+                "a:has-text('View unit')",
+                "a:has-text('Bekijk woning')",
+                "[data-testid*='unit-card']",
+                "[class*='unit-card']",
+                "a[href*='/en/']:has-text('View')",
+                "a:has-text('unit')",
+            ):
+                try:
+                    n = await page.locator(css).count()
+                    if n > 0:
+                        if VERBOSE:
+                            print(f"[count] via CSS {css} => {n}")
+                        return n
+                except Exception:
+                    pass
+
+            # Save a debug screenshot + HTML on failure
+            try:
+                await page.screenshot(path=f"vesteda_debug_attempt{attempt}.png", full_page=True)
+                html = await page.content()
+                Path(f"vesteda_debug_attempt{attempt}.html").write_text(html)
+                print(f"[debug] Saved screenshot+html: vesteda_debug_attempt{attempt}.png/.html")
+            except Exception:
+                pass
+
+            raise RuntimeError("Could not determine listing count.")
+
+        except Exception as e:
+            print(f"[retry {attempt}/3] {e}")
+            traceback.print_exc()
+            if attempt == 3:
+                # last attempt, re-raise
+                raise
+            await asyncio.sleep(2 * attempt)
 
 # ===================== SCHEDULER =====================
 
@@ -251,6 +302,8 @@ def within_work_window(now: datetime) -> bool:
 
 
 async def monitor_loop() -> None:
+    if VERBOSE:
+        print("[build] vesteda-watch-20250915-1")
     last_count = load_last_count()
 
     async with async_playwright() as p:
@@ -308,6 +361,11 @@ async def monitor_loop() -> None:
                 await asyncio.sleep(60)
 
 def main() -> None:
+    try:
+        asyncio.run(monitor_loop())
+    except KeyboardInterrupt:
+        print("[exit] Stopped by user")
+
     try:
         asyncio.run(monitor_loop())
     except KeyboardInterrupt:
